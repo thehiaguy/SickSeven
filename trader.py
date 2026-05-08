@@ -11,6 +11,7 @@ trading_state.json for the dashboard to read.
 import json
 import logging
 import os
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,12 @@ from strategy import compute_indicators, generate_signal, select_market, compute
 
 load_dotenv()
 
+# Force UTF-8 on Windows terminals so Unicode log characters (→ ▲ ▼) don't crash.
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+if hasattr(sys.stderr, "reconfigure"):
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+
 GECKO_API_KEY = os.getenv("GECKO_API", "")
 GECKO_BASE    = "https://api.coingecko.com/api/v3"
 STATE_FILE    = Path("trading_state.json")
@@ -34,7 +41,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(levelname)s  %(message)s",
     handlers=[
-        logging.FileHandler(LOG_FILE),
+        logging.FileHandler(LOG_FILE, encoding="utf-8"),
         logging.StreamHandler(),
     ],
 )
