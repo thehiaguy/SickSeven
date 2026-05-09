@@ -130,17 +130,55 @@ def get_balance() -> dict:
     return _get("/portfolio/balance")
 
 
+def _normalize_market(m: dict) -> dict:
+    """
+    Normalize a raw Kalshi v2 market dict to the field names the rest of
+    the codebase expects.  The May 2026 API migration renamed fields:
+      yes_ask_dollars / no_ask_dollars  (dollar strings "0.5000")
+        → yes_ask / no_ask              (integer cents 50)
+      volume_fp  (string "1234.00")
+        → volume                        (float)
+      floor_strike is now provided directly (no ticker parsing needed)
+      close_time  is the trading cut-off used for Greeks / expiry
+    """
+    def _cents(key: str) -> int:
+        val = m.get(key)
+        return round(float(val) * 100) if val is not None else None
+
+    m["yes_ask"] = _cents("yes_ask_dollars")
+    m["no_ask"]  = _cents("no_ask_dollars")
+    m["yes_bid"] = _cents("yes_bid_dollars")
+    m["no_bid"]  = _cents("no_bid_dollars")
+
+    for vol_key in ("volume_fp", "volume_24h_fp", "volume"):
+        raw = m.get(vol_key)
+        if raw is not None:
+            try:
+                m["volume"] = float(raw)
+                break
+            except (TypeError, ValueError):
+                pass
+    else:
+        m.setdefault("volume", 0)
+
+    # close_time is when trading stops — use for Greeks expiry
+    if m.get("close_time") and "expiration_time" not in m:
+        m["expiration_time"] = m["close_time"]
+
+    return m
+
+
 def get_markets(series_ticker: str = "KXBTCD", status: str = "open") -> list:
     data = _get("/markets", {"series_ticker": series_ticker,
                               "status": status, "limit": 50})
-    return data.get("markets", [])
+    return [_normalize_market(m) for m in data.get("markets", [])]
 
 
 def search_markets(keyword: str, status: str = "open") -> list:
     """Fallback: keyword search across all open markets."""
     data = _get("/markets", {"status": status, "limit": 100})
     kw   = keyword.lower()
-    return [m for m in data.get("markets", [])
+    return [_normalize_market(m) for m in data.get("markets", [])
             if kw in m.get("title", "").lower() or kw in m.get("ticker", "").lower()]
 
 

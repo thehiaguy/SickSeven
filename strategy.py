@@ -240,7 +240,13 @@ def _norm_cdf(x: float) -> float:
 
 
 def _parse_strike(market: dict) -> Optional[float]:
-    """Extract BTC strike from Kalshi ticker (T95000 pattern) or title ($95,000)."""
+    """
+    Extract BTC strike price from a Kalshi market dict.
+    Prefers the direct floor_strike field (new API), falls back to
+    ticker regex (T95000 pattern) then title ($95,000).
+    """
+    if market.get("floor_strike") is not None:
+        return float(market["floor_strike"])
     m = re.search(r'[Tt](\d{4,7})\b', market.get("ticker", ""))
     if m:
         return float(m.group(1))
@@ -254,8 +260,8 @@ def _parse_strike(market: dict) -> Optional[float]:
 
 
 def _parse_hours_to_expiry(market: dict) -> float:
-    """Hours until market expiry; returns 4.0 when the field is missing."""
-    for key in ("expiration_time", "close_time", "expiry_time"):
+    """Hours until market trading closes; returns 4.0 when field is missing."""
+    for key in ("close_time", "expected_expiration_time", "expiration_time", "expiry_time"):
         val = market.get(key)
         if not val:
             continue
