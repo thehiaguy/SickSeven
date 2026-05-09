@@ -421,6 +421,7 @@ def compute_order(
     max_contracts: int,
     atr_pct: float = 0.003,
     btc_price: float = 0.0,
+    use_greeks: bool = True,
 ) -> Optional[dict]:
     """
     Convert signal + market into order parameters.
@@ -447,14 +448,17 @@ def compute_order(
     base_vol   = 0.003
     vol_factor = min(1.0, base_vol / max(atr_pct, base_vol * 0.1))
 
-    # Greek-adjusted factor — use pre-computed Greeks from select_market if present
-    greeks = market.get("_greeks")
-    if greeks is None and btc_price > 0:
-        strike = _parse_strike(market)
-        hours  = _parse_hours_to_expiry(market)
-        if strike:
-            annual_vol = atr_pct * math.sqrt(8760)
-            greeks     = compute_greeks(ask, btc_price, strike, hours, annual_vol)
+    # Greek-adjusted factor — skipped for short-duration contracts (e.g. KXBTC15M)
+    # where near-zero T causes delta to blow up and gamma_factor to collapse to ~0.
+    greeks = None
+    if use_greeks:
+        greeks = market.get("_greeks")
+        if greeks is None and btc_price > 0:
+            strike = _parse_strike(market)
+            hours  = _parse_hours_to_expiry(market)
+            if strike:
+                annual_vol = atr_pct * math.sqrt(8760)
+                greeks     = compute_greeks(ask, btc_price, strike, hours, annual_vol)
 
     greek_factor = greeks["gamma_factor"] if greeks else 1.0
 

@@ -353,6 +353,7 @@ def run_cycle(config: dict, state: dict) -> dict:
             config["max_contracts"],
             atr_pct=indicators.get("atr_pct", 0.003),
             btc_price=live_price,
+            use_greeks=not is_15m,
         )
         if not order_params:
             log.info("No order computed (missing price data?)")
