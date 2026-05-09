@@ -21,7 +21,8 @@ import requests
 from dotenv import load_dotenv
 
 import kalshi_client as kc
-from strategy import compute_indicators, generate_signal, select_market, compute_order
+from strategy import (compute_indicators, generate_signal, select_market, compute_order,
+                      compute_short_term_indicators, generate_short_term_signal)
 
 load_dotenv()
 
@@ -51,12 +52,14 @@ DEFAULT_CONFIG: dict = {
     "enabled":            False,   # master switch — must be True to place real orders
     "dry_run":            True,    # log orders but never actually send them
     "series_ticker":      "KXBTCD",
+    # For 15-minute events use "KXBTC15M" — the daemon will automatically
+    # switch to Kraken 15m candles and the short-term signal engine.
     "max_contracts":      2,       # conservative: ~$1 per trade at 50c/contract
     "max_open_risk_usd":  5.0,     # hard cap on total open exposure in USD
     "stop_loss_pct":      0.40,    # close a position when its loss exceeds 40% of cost
-    "only_on_change":     True,    # skip order if signal label hasn't changed
-    "cooldown_minutes":   15,      # minimum minutes between consecutive orders
-    "loop_interval_sec":  60,
+    "only_on_change":     False,   # for 15M: signal changes every candle, so False is fine
+    "cooldown_minutes":   15,      # for 15M: one trade per contract window
+    "loop_interval_sec":  30,      # 30s keeps up with 15M windows without hammering APIs
 }
 
 
@@ -123,6 +126,23 @@ def fetch_price_history() -> pd.Series:
     return pd.Series([p[1] for p in r.json()["prices"]])
 
 
+def fetch_short_term_data(timeframe: str = "15m") -> pd.DataFrame:
+    """Fetch Kraken OHLCV candles for short-term signal (1m/5m/15m)."""
+    interval_map = {"1m": 1, "5m": 5, "15m": 15}
+    interval = interval_map.get(timeframe, 15)
+    url = f"https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval={interval}"
+    r = requests.get(url, timeout=10)
+    r.raise_for_status()
+    result = r.json()["result"]
+    key = next(k for k in result if k != "last")
+    cols = ["time", "open", "high", "low", "close", "vwap", "volume", "count"]
+    df = pd.DataFrame(result[key], columns=cols)
+    for col in ["open", "high", "low", "close", "vwap", "volume"]:
+        df[col] = df[col].astype(float)
+    df["time"] = pd.to_datetime(df["time"], unit="s", utc=True)
+    return df.set_index("time")
+
+
 # ---------------------------------------------------------------------------
 # Risk helpers
 # ---------------------------------------------------------------------------
@@ -186,23 +206,31 @@ def run_cycle(config: dict, state: dict) -> dict:
     state["errors"]   = []
 
     # ── 1. Compute signal ────────────────────────────────────────────────────
+    is_15m = config.get("series_ticker") == "KXBTC15M"
     try:
-        prices     = fetch_price_history()
-        indicators = compute_indicators(prices)
-        signal     = generate_signal(indicators)
-
-        # Overlay composite BRTI-approximate price for display and Greeks.
-        # The 30-day hourly series from CoinGecko drives the signal; the
-        # composite gives a fresher price for risk management calculations.
-        try:
-            from price_feed import get_composite_price
-            _cp = get_composite_price()
-            live_price = _cp["price"]
-            state["price_feed"] = _cp
-        except Exception as _pf_err:
-            log.debug(f"Composite price feed failed, using CoinGecko last: {_pf_err}")
-            live_price = indicators["price"]
+        if is_15m:
+            # Short-term mode: Kraken 15m candles → short-term signal engine
+            df         = fetch_short_term_data("15m")
+            indicators = compute_short_term_indicators(df, "15m")
+            signal     = generate_short_term_signal(indicators)
+            live_price = float(indicators.get("price", 0))
             state["price_feed"] = None
+        else:
+            # Long-term mode: CoinGecko 30-day hourly → long-term signal engine
+            prices     = fetch_price_history()
+            indicators = compute_indicators(prices)
+            signal     = generate_signal(indicators)
+
+            # Overlay composite BRTI-approximate price for display and Greeks.
+            try:
+                from price_feed import get_composite_price
+                _cp = get_composite_price()
+                live_price = _cp["price"]
+                state["price_feed"] = _cp
+            except Exception as _pf_err:
+                log.debug(f"Composite price feed failed, using CoinGecko last: {_pf_err}")
+                live_price = indicators["price"]
+                state["price_feed"] = None
 
         state["current_price"]      = live_price
         state["current_indicators"] = indicators
@@ -299,6 +327,20 @@ def run_cycle(config: dict, state: dict) -> dict:
         if not market:
             state["errors"].append("No suitable market found")
             return state
+
+        # 15M guard: don't enter a contract with <5 minutes remaining
+        if is_15m:
+            close_str = market.get("close_time") or market.get("expiration_time")
+            if close_str:
+                try:
+                    close_dt = datetime.fromisoformat(str(close_str).replace("Z", "+00:00"))
+                    mins_left = (close_dt - datetime.now(timezone.utc)).total_seconds() / 60
+                    if mins_left < 5:
+                        log.info(f"15M contract {market['ticker']} expires in {mins_left:.1f}m — too late to enter")
+                        return state
+                    log.info(f"15M contract {market['ticker']}: {mins_left:.1f}m remaining")
+                except Exception:
+                    pass
 
         # Don't double into an existing position on the same market
         if already_positioned(state.get("active_positions", []), market["ticker"]):
