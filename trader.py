@@ -283,6 +283,36 @@ def run_cycle(config: dict, state: dict) -> dict:
                 log.error(f"Stop-loss close failed for {ticker}: {e}")
                 state["errors"].append(f"Stop-loss error {ticker}: {e}")
 
+    # ── 3b. 15M early exit on signal reversal ───────────────────────────────
+    if is_15m and config.get("enabled"):
+        for p in list(positions):
+            ticker  = p.get("ticker", "")
+            net_pos = p.get("position", 0)
+            if not ticker.startswith("KXBTC15M") or net_pos == 0:
+                continue
+            holding_yes = net_pos > 0
+            reversed_ = (
+                (holding_yes     and signal["direction"] == "down") or
+                (not holding_yes and signal["direction"] == "up")
+            )
+            if not reversed_:
+                continue
+            pnl_usd = (p.get("unrealized_pnl") or 0) / 100
+            side_str = "YES" if holding_yes else "NO"
+            log.info(
+                f"15M signal reversal — closing {side_str} on {ticker} "
+                f"(P&L ${pnl_usd:+.2f}) | new signal: {signal['label']}"
+            )
+            if not config.get("dry_run"):
+                try:
+                    kc.close_position(ticker, net_pos)
+                    state["last_order_time"] = now
+                except Exception as e:
+                    log.error(f"15M early exit failed for {ticker}: {e}")
+                    state["errors"].append(f"Early exit: {e}")
+            else:
+                log.info(f"[DRY RUN] Would close {ticker} on signal reversal")
+
     # ── 4. Guard rails ───────────────────────────────────────────────────────
     if not config["enabled"]:
         log.info("Trading disabled — no order placed")
