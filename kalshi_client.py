@@ -53,14 +53,17 @@ _PRIVATE_KEY = _load_private_key()
 
 def _signed_headers(method: str, path: str) -> dict:
     """
-    Kalshi RSA auth.  Signed message = timestamp_ms + METHOD + full_path.
+    Kalshi RSA-PSS auth.  Signed message = timestamp_ms + METHOD + full_path.
     A fresh timestamp is generated on every call so retries get new signatures.
     """
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import padding
     ts  = str(int(time.time() * 1000))
     msg = (ts + method.upper() + _API_PREFIX + path).encode()
-    sig = _PRIVATE_KEY.sign(msg, padding.PKCS1v15(), hashes.SHA256())
+    sig = _PRIVATE_KEY.sign(msg, padding.PSS(
+        mgf=padding.MGF1(hashes.SHA256()),
+        salt_length=padding.PSS.DIGEST_LENGTH,
+    ), hashes.SHA256())
     return {
         "KALSHI-ACCESS-KEY":       _KEY_ID,
         "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
