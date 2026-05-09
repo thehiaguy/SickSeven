@@ -59,7 +59,7 @@ DEFAULT_CONFIG: dict = {
     "stop_loss_pct":      0.40,    # close a position when its loss exceeds 40% of cost
     "only_on_change":     False,   # for 15M: signal changes every candle, so False is fine
     "cooldown_minutes":   15,      # for 15M: one trade per contract window
-    "loop_interval_sec":  30,      # 30s keeps up with 15M windows without hammering APIs
+    "loop_interval_sec":  10,      # 10s keeps up with 15M windows
 }
 
 
@@ -110,6 +110,12 @@ def _empty_state() -> dict:
         "recent_orders":          [],
         "total_realized_pnl_cents": 0,
         "errors":                 [],
+        # 15M state tracking (supplements Kalshi positions API which lags after fill)
+        "ordered_ticker":          None,
+        "ordered_ticker_expiry":   None,
+        "ordered_ticker_cost_usd": 0.0,
+        "ordered_ticker_side":     None,
+        "ordered_ticker_count":    0,
     }
 
 
@@ -187,7 +193,26 @@ def cooldown_remaining(last_order_iso: Optional[str], cooldown_minutes: float) -
         remaining = cooldown_minutes * 60 - elapsed
         return max(0.0, remaining)
     except Exception:
-        return 0.0
+        # Corrupted timestamp — enforce full cooldown to avoid bypassing it
+        log.warning(f"Could not parse last_order_time '{last_order_iso}' — enforcing full cooldown")
+        return cooldown_minutes * 60
+
+
+def clear_expired_15m_tracking(state: dict) -> None:
+    """Reset 15M order tracking once the tracked contract has expired."""
+    expiry = state.get("ordered_ticker_expiry")
+    if not expiry:
+        return
+    try:
+        exp_dt = datetime.fromisoformat(str(expiry).replace("Z", "+00:00"))
+        if exp_dt <= datetime.now(timezone.utc):
+            state["ordered_ticker"]          = None
+            state["ordered_ticker_expiry"]   = None
+            state["ordered_ticker_cost_usd"] = 0.0
+            state["ordered_ticker_side"]     = None
+            state["ordered_ticker_count"]    = 0
+    except Exception:
+        pass
 
 
 # Bring Optional into scope (used by cooldown_remaining type hint)
@@ -255,11 +280,16 @@ def run_cycle(config: dict, state: dict) -> dict:
         return state
 
     # ── 2. Refresh portfolio ─────────────────────────────────────────────────
+    if is_15m:
+        clear_expired_15m_tracking(state)
+
     try:
         bal = kc.get_balance()
         state["balance_cents"]   = bal.get("balance", 0)
         positions                = kc.get_positions()
         state["active_positions"] = positions
+        if is_15m and not positions:
+            log.debug("Positions API returned empty — using state-tracked cost for risk cap")
     except Exception as e:
         log.warning(f"Portfolio refresh failed: {e}")
         state["errors"].append(f"Portfolio: {e}")
@@ -313,6 +343,44 @@ def run_cycle(config: dict, state: dict) -> dict:
             else:
                 log.info(f"[DRY RUN] Would close {ticker} on signal reversal")
 
+    # ── 3c. 15M profit-take at 80¢ bid ──────────────────────────────────────
+    if is_15m and config.get("enabled") and not config.get("dry_run"):
+        tracked_ticker = state.get("ordered_ticker")
+        tracked_side   = state.get("ordered_ticker_side")
+        tracked_count  = state.get("ordered_ticker_count", 0)
+        tracked_expiry = state.get("ordered_ticker_expiry")
+        if tracked_ticker and tracked_side and tracked_count and tracked_expiry:
+            try:
+                exp_dt = datetime.fromisoformat(str(tracked_expiry).replace("Z", "+00:00"))
+                if exp_dt > datetime.now(timezone.utc):
+                    pt_markets = kc.get_markets(series_ticker=config.get("series_ticker", "KXBTC15M"))
+                    pt_market  = next((m for m in pt_markets if m.get("ticker") == tracked_ticker), None)
+                    if pt_market:
+                        bid_key     = "yes_bid" if tracked_side == "yes" else "no_bid"
+                        current_bid = pt_market.get(bid_key) or 0
+                        if current_bid >= 80:
+                            log.info(
+                                f"Profit-take: {tracked_ticker} {tracked_side.upper()} "
+                                f"bid={current_bid}¢ ≥ 80¢ — selling {tracked_count} contracts"
+                            )
+                            kc.place_order(
+                                ticker     = tracked_ticker,
+                                action     = "sell",
+                                side       = tracked_side,
+                                count      = tracked_count,
+                                order_type = "market",
+                            )
+                            state["ordered_ticker"]          = None
+                            state["ordered_ticker_expiry"]   = None
+                            state["ordered_ticker_cost_usd"] = 0.0
+                            state["ordered_ticker_side"]     = None
+                            state["ordered_ticker_count"]    = 0
+                            state["errors"].append(
+                                f"Profit-take: sold {tracked_ticker} {tracked_side.upper()} at {current_bid}¢"
+                            )
+            except Exception as e:
+                log.warning(f"Profit-take check failed: {e}")
+
     # ── 4. Guard rails ───────────────────────────────────────────────────────
     if not config["enabled"]:
         log.info("Trading disabled — no order placed")
@@ -332,8 +400,10 @@ def run_cycle(config: dict, state: dict) -> dict:
         log.info(f"Cooldown active — {cd_secs:.0f}s remaining")
         return state
 
-    # Risk cap
-    risk = open_risk_usd(state.get("active_positions", []))
+    # Risk cap — use state-tracked cost when Kalshi positions API returns empty (15M lag)
+    api_risk = open_risk_usd(state.get("active_positions", []))
+    tracked_risk = state.get("ordered_ticker_cost_usd", 0.0) if is_15m else 0.0
+    risk = max(api_risk, tracked_risk)
     if risk >= config["max_open_risk_usd"]:
         msg = f"Open risk ${risk:.2f} >= cap ${config['max_open_risk_usd']} — skipping"
         log.warning(msg)
@@ -376,6 +446,19 @@ def run_cycle(config: dict, state: dict) -> dict:
         if already_positioned(state.get("active_positions", []), market["ticker"]):
             log.info(f"Already positioned on {market['ticker']} — skipping")
             return state
+
+        # 15M: Kalshi positions API lags after fill — also check our own state tracking
+        if is_15m:
+            ot     = state.get("ordered_ticker")
+            ot_exp = state.get("ordered_ticker_expiry")
+            if ot == market["ticker"] and ot_exp:
+                try:
+                    exp_dt = datetime.fromisoformat(str(ot_exp).replace("Z", "+00:00"))
+                    if exp_dt > datetime.now(timezone.utc):
+                        log.info(f"Already ordered {ot} this window (state-tracked) — skipping")
+                        return state
+                except Exception:
+                    pass
 
         order_params = compute_order(
             signal,
@@ -439,6 +522,15 @@ def run_cycle(config: dict, state: dict) -> dict:
             order_record["result"] = result
             state["last_order_time"] = now
             log.info(f"Order placed: {result}")
+            if is_15m:
+                state["ordered_ticker"]          = market["ticker"]
+                state["ordered_ticker_expiry"]   = (market.get("close_time")
+                                                    or market.get("expiration_time"))
+                state["ordered_ticker_cost_usd"] = (state.get("ordered_ticker_cost_usd", 0.0)
+                                                    + order_params["cost_usd"])
+                state["ordered_ticker_side"]     = order_params["side"]
+                state["ordered_ticker_count"]    = (state.get("ordered_ticker_count", 0)
+                                                    + order_params["count"])
         except Exception as e:
             log.error(f"Order placement failed: {e}", exc_info=True)
             order_record["result"] = f"ERROR: {e}"

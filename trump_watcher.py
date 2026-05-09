@@ -162,6 +162,8 @@ def fetch_latest_tweets(limit: int = 5) -> list:
             tweets = []
             for entry in feed.entries[:limit]:
                 tweet_id = entry.get("id") or entry.get("link") or ""
+                if not tweet_id:
+                    continue  # skip entries with no identifier — can't deduplicate them
                 raw      = entry.get("title") or entry.get("summary") or ""
                 text     = re.sub(r"<[^>]+>", " ", raw).strip()
                 text     = re.sub(r"\s+", " ", text)
@@ -221,6 +223,9 @@ def get_trump_signal(max_age_minutes: int = 30) -> Optional[dict]:
             return None
         if sig.get("impact") == "neutral" or sig.get("probability_adjustment", 0.0) == 0.0:
             return None
+        # Re-clamp adjustment so a hand-edited state file can't produce extreme shifts
+        adj = float(sig.get("probability_adjustment", 0.0))
+        sig["probability_adjustment"] = max(-0.25, min(0.25, adj))
         return sig
     except Exception:
         return None
@@ -249,7 +254,13 @@ def run_watcher():
         try:
             state["last_checked"] = datetime.now(timezone.utc).isoformat()
             tweets     = fetch_latest_tweets(limit=5)
-            new_tweets = [t for t in tweets if t["id"] not in seen_ids]
+            # Deduplicate within this batch too (same tweet from multiple RSS sources)
+            seen_this_batch: set = set()
+            new_tweets = []
+            for t in tweets:
+                if t["id"] not in seen_ids and t["id"] not in seen_this_batch:
+                    new_tweets.append(t)
+                    seen_this_batch.add(t["id"])
 
             if not tweets:
                 log.warning("All RSS sources returned empty — check connectivity")

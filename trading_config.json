@@ -1,11 +1,11 @@
 {
   "enabled": false,
-  "dry_run": true,
+  "dry_run": false,
   "series_ticker": "KXBTC15M",
-  "max_contracts": 2,
+  "max_contracts": 5,
   "max_open_risk_usd": 5.0,
-  "stop_loss_pct": 0.40,
-  "only_on_change": false,
-  "cooldown_minutes": 15,
-  "loop_interval_sec": 30
+  "stop_loss_pct": 0.4,
+  "only_on_change": true,
+  "cooldown_minutes": 1,
+  "loop_interval_sec": 10
 }

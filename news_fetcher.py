@@ -77,7 +77,7 @@ def _fetch_rss(name: str, url: str, max_items: int = 8) -> list[dict]:
 
 def _fetch_reddit(name: str, url: str, max_items: int = 8) -> list[dict]:
     try:
-        r = requests.get(url, headers={"User-Agent": REDDIT_UA}, timeout=8)
+        r = requests.get(url, headers={"User-Agent": REDDIT_UA}, timeout=15)
         r.raise_for_status()
         posts = r.json().get("data", {}).get("children", [])
         items = []
@@ -139,11 +139,11 @@ def fetch_all_headlines(
             except Exception:
                 pass
 
-    # Deduplicate by title similarity (exact prefix match is enough)
+    # Deduplicate: include source so similar titles from different outlets both appear
     seen: set[str] = set()
     unique: list[dict] = []
     for item in all_items:
-        key = item["title"][:60].lower().strip()
+        key = f"{item.get('source', '')}|{item['title'][:60].lower().strip()}"
         if key and key not in seen:
             seen.add(key)
             unique.append(item)

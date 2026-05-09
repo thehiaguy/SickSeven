@@ -339,8 +339,9 @@ def get_combined_probability(
         llm_result = run_llm_estimate(
             indicators, bull_score, kalshi_mkts, news_text, fng, macro
         )
-        llm_prob       = float(llm_result["probability_up"])
+        llm_prob       = max(0.0, min(1.0, float(llm_result["probability_up"])))
         combined_prob  = blend_probabilities(tech_prob, llm_prob, tech_weight, llm_weight)
+        combined_prob  = max(0.0, min(1.0, combined_prob))
         label, direction, strength = probability_to_signal(combined_prob)
     except Exception as e:
         log.warning(f"LLM estimate failed: {e} — falling back to technical only")

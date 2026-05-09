@@ -73,8 +73,10 @@ def compute_indicators(prices: pd.Series) -> dict:
     bb_upper, bb_mid, bb_lower = compute_bollinger(prices)
 
     # Bollinger %B: 0 = price at lower band, 1 = price at upper band
+    # Clamp to [0,1] so near-zero bandwidth doesn't produce extreme values that
+    # falsely trigger the band-extreme scoring.
     bb_width = bb_upper - bb_lower
-    bb_pct_b = (prices - bb_lower) / bb_width.replace(0, np.nan)
+    bb_pct_b = ((prices - bb_lower) / bb_width.replace(0, np.nan)).clip(0.0, 1.0)
 
     # Volatility proxy: rolling std of log returns over 14 periods
     log_ret = np.log(prices / prices.shift(1))
@@ -335,6 +337,8 @@ def compute_greeks(
 
     # Sizing multiplier: reference 15¢/$1k = typical 4-hour near-ATM binary
     gamma_factor = min(1.0, 15.0 / max(abs(delta_per_1k), 0.5))
+    if math.isnan(gamma_factor):
+        gamma_factor = 0.3
     if near_expiry:
         gamma_factor = min(gamma_factor, 0.3)  # hard cap at 30% size near expiry
 
@@ -387,7 +391,7 @@ def select_market(
             continue
 
         target = yes_ask if direction == "up" else no_ask
-        if 15 <= target <= 85:
+        if 20 <= target <= 80:
             proximity    = 1.0 - abs(target - 50) / 50.0
             vol_score    = math.log1p(volume)
             greek_factor = 1.0
@@ -600,11 +604,11 @@ def generate_short_term_signal(ind: dict) -> dict:
 
     score = 0
 
-    # RSI (±2)
+    # RSI (±2) — tightened thresholds vs long-term to catch overbought/oversold faster
     if rsi < 30:    score += 2
     elif rsi < 40:  score += 1
     elif rsi > 70:  score -= 2
-    elif rsi > 60:  score -= 1
+    elif rsi > 55:  score -= 1   # was >60; RSI 55-70 now scores -1 instead of 0
 
     # MACD (±2)
     if macd > macd_sig:
@@ -624,13 +628,15 @@ def generate_short_term_signal(ind: dict) -> dict:
     if bb_pct_b <= 0.05:    score += 1
     elif bb_pct_b >= 0.95:  score -= 1
 
+    # Wider HOLD band: require ≥3 for BUY (was ≥2) so a moderate uptrend
+    # with RSI slightly overbought doesn't auto-trigger entry.
     if score >= 4:
         label, direction, strength = "STRONG BUY",  "up",      1.0
-    elif score >= 2:
+    elif score >= 3:
         label, direction, strength = "BUY",          "up",      0.5
     elif score <= -4:
         label, direction, strength = "STRONG SELL",  "down",    1.0
-    elif score <= -2:
+    elif score <= -3:
         label, direction, strength = "SELL",          "down",    0.5
     else:
         label, direction, strength = "HOLD",          "neutral", 0.0

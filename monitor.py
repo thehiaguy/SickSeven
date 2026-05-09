@@ -90,7 +90,10 @@ def _kalshi_headers(path: str) -> dict:
     from cryptography.hazmat.primitives.asymmetric import padding
     ts  = str(int(time.time() * 1000))
     msg = (ts + "GET" + KALSHI_API_PFX + path).encode()
-    sig = _KAL_KEY.sign(msg, padding.PKCS1v15(), hashes.SHA256())
+    sig = _KAL_KEY.sign(msg, padding.PSS(
+        mgf=padding.MGF1(hashes.SHA256()),
+        salt_length=padding.PSS.DIGEST_LENGTH,
+    ), hashes.SHA256())
     return {
         "KALSHI-ACCESS-KEY":       KALSHI_KEY_ID,
         "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),

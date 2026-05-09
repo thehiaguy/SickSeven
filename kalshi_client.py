@@ -95,10 +95,18 @@ def _request(method: str, path: str, *, params=None, json=None, timeout=10) -> d
             r.raise_for_status()
             return r.json()
         except requests.HTTPError as e:
-            # 4xx errors are not transient — don't retry
-            if e.response is not None and 400 <= e.response.status_code < 500:
-                raise
-            last_exc = e
+            if e.response is not None:
+                status = e.response.status_code
+                if status == 429:
+                    # Rate-limited — back off and retry
+                    last_exc = e
+                elif 400 <= status < 500:
+                    # Other 4xx are not transient — don't retry
+                    raise
+                else:
+                    last_exc = e
+            else:
+                last_exc = e
         except (requests.ConnectionError, requests.Timeout) as e:
             last_exc = e
 

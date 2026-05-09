@@ -79,20 +79,102 @@ def _load_kalshi_key():
 _KAL_KEY = _load_kalshi_key()
 
 
-def _kalshi_headers(path: str) -> dict:
-    """Generate fresh signed headers. Called individually per request."""
+def _kalshi_signed_headers(method: str, path: str) -> dict:
+    """Generate fresh signed headers for any HTTP method."""
     if not _KAL_KEY or not KALSHI_KEY_ID:
         return {}
     from cryptography.hazmat.primitives import hashes
     from cryptography.hazmat.primitives.asymmetric import padding
     ts  = str(int(time.time() * 1000))
-    msg = (ts + "GET" + KALSHI_API_PFX + path).encode()
-    sig = _KAL_KEY.sign(msg, padding.PKCS1v15(), hashes.SHA256())
+    msg = (ts + method.upper() + KALSHI_API_PFX + path).encode()
+    sig = _KAL_KEY.sign(msg, padding.PSS(
+        mgf=padding.MGF1(hashes.SHA256()),
+        salt_length=padding.PSS.DIGEST_LENGTH,
+    ), hashes.SHA256())
     return {
         "KALSHI-ACCESS-KEY":       KALSHI_KEY_ID,
         "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode(),
         "KALSHI-ACCESS-TIMESTAMP": ts,
     }
+
+
+def _kalshi_headers(path: str) -> dict:
+    return _kalshi_signed_headers("GET", path)
+
+
+def _kal_get(path: str, params: dict | None = None) -> dict:
+    headers = _kalshi_signed_headers("GET", path)
+    r = requests.get(KALSHI_BASE_URL + KALSHI_API_PFX + path,
+                     headers=headers, params=params, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+
+def _kal_post(path: str, body: dict) -> dict:
+    headers = _kalshi_signed_headers("POST", path)
+    headers["Content-Type"] = "application/json"
+    r = requests.post(KALSHI_BASE_URL + KALSHI_API_PFX + path,
+                      headers=headers, json=body, timeout=15)
+    r.raise_for_status()
+    return r.json()
+
+
+def _kal_delete(path: str) -> dict:
+    headers = _kalshi_signed_headers("DELETE", path)
+    r = requests.delete(KALSHI_BASE_URL + KALSHI_API_PFX + path,
+                        headers=headers, timeout=10)
+    r.raise_for_status()
+    return r.json()
+
+
+def emergency_flatten() -> tuple[int, int, list[str]]:
+    """Cancel all resting orders and market-sell every open position."""
+    import uuid
+    errors: list[str] = []
+    cancelled = 0
+    closed    = 0
+
+    try:
+        data = _kal_get("/portfolio/orders", {"status": "resting", "limit": 100})
+        for order in data.get("orders", []):
+            oid = order.get("order_id", "")
+            try:
+                _kal_delete(f"/portfolio/orders/{oid}")
+                cancelled += 1
+            except Exception as e:
+                errors.append(f"Cancel {oid}: {e}")
+    except Exception as e:
+        errors.append(f"Fetch orders failed: {e}")
+
+    try:
+        data = _kal_get("/portfolio/positions")
+        for pos in data.get("market_positions", []):
+            ticker = pos.get("ticker", "")
+            net    = pos.get("position", 0)
+            if net == 0:
+                continue
+            side  = "yes" if net > 0 else "no"
+            count = abs(net)
+            try:
+                result = _kal_post("/portfolio/orders", {
+                    "ticker":          ticker,
+                    "client_order_id": str(uuid.uuid4()),
+                    "action":          "sell",
+                    "type":            "market",
+                    "side":            side,
+                    "count":           count,
+                })
+                order = result.get("order", {})
+                if order.get("status") in ("executed", "resting", "pending"):
+                    closed += 1
+                else:
+                    errors.append(f"Close {ticker}: unexpected status '{order.get('status')}'")
+            except Exception as e:
+                errors.append(f"Close {ticker}: {e}")
+    except Exception as e:
+        errors.append(f"Fetch positions failed: {e}")
+
+    return cancelled, closed, errors
 
 
 # ---------------------------------------------------------------------------
@@ -461,6 +543,42 @@ elif is_running:
 else:
     st.info("⚫  Trader daemon is not running.  Start it with:  `python trader.py`")
 
+# ---------------------------------------------------------------------------
+# Emergency panic button
+# ---------------------------------------------------------------------------
+with st.expander("🚨 Emergency Controls", expanded=False):
+    st.markdown(
+        "**Cancel all resting orders and market-sell every open position immediately.**  \n"
+        "This also disables the trader daemon so it cannot open new positions."
+    )
+    if "panic_confirm" not in st.session_state:
+        st.session_state["panic_confirm"] = False
+
+    if not st.session_state["panic_confirm"]:
+        if st.button("⚠ Flatten All Positions", type="primary", use_container_width=True):
+            st.session_state["panic_confirm"] = True
+            st.rerun()
+    else:
+        st.warning("Are you sure? This will sell everything at market price right now.")
+        col_yes, col_no = st.columns(2)
+        with col_no:
+            if st.button("Cancel", use_container_width=True):
+                st.session_state["panic_confirm"] = False
+                st.rerun()
+        with col_yes:
+            if st.button("YES — Close Everything Now", type="primary", use_container_width=True):
+                st.session_state["panic_confirm"] = False
+                cfg = load_config()
+                cfg["enabled"] = False
+                save_config(cfg)
+                with st.spinner("Cancelling orders and closing positions…"):
+                    n_cancel, n_close, errs = emergency_flatten()
+                if errs:
+                    st.error(f"Done with errors — cancelled {n_cancel} orders, closed {n_close} positions.\n\n" + "\n".join(errs))
+                else:
+                    st.success(f"Done — cancelled {n_cancel} resting orders, closed {n_close} positions. Trading disabled.")
+                st.cache_data.clear()
+
 # Portfolio snapshot
 tc1, tc2, tc3, tc4, tc5 = st.columns(5)
 bal_cents = trader_state.get("balance_cents")
@@ -593,7 +711,7 @@ with st.form("trading_config_form"):
         )
         loop_interval = st.number_input(
             "Cycle interval (seconds)",
-            min_value=30, max_value=3600,
+            min_value=10, max_value=3600,
             value=int(config.get("loop_interval_sec", 60)),
         )
 
