@@ -40,7 +40,7 @@ KALSHI_KEY_ID   = os.getenv("KALSHI_API_KEY", "")
 KALSHI_PRIV_RAW = os.getenv("KALSHI_PRIV", "")
 GECKO_BASE      = "https://api.coingecko.com/api/v3"
 KRAKEN_BASE     = "https://api.kraken.com/0/public"
-KALSHI_BASE_URL = "https://api.kalshi.com"
+KALSHI_BASE_URL = "https://external-api.kalshi.com"
 KALSHI_API_PFX  = "/trade-api/v2"
 STATE_FILE      = Path("trading_state.json")
 

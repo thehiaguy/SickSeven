@@ -14,7 +14,7 @@ load_dotenv()
 
 log = logging.getLogger(__name__)
 
-_KALSHI_BASE_URL = "https://api.kalshi.com"
+_KALSHI_BASE_URL = "https://external-api.kalshi.com"
 _API_PREFIX      = "/trade-api/v2"
 _KEY_ID          = os.getenv("KALSHI_API_KEY", "")
 _PRIV_RAW        = os.getenv("KALSHI_PRIV", "")
