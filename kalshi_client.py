@@ -193,7 +193,7 @@ def get_orders(status: str = "resting") -> list:
 
 
 def get_order(order_id: str) -> dict:
-    return _get(f"/orders/{order_id}")
+    return _get(f"/portfolio/orders/{order_id}")
 
 
 def place_order(
@@ -220,7 +220,7 @@ def place_order(
     }
     if order_type == "limit" and price_cents is not None:
         body["yes_price" if side == "yes" else "no_price"] = price_cents
-    return _post("/orders", body)
+    return _post("/portfolio/orders", body)
 
 
 def close_position(ticker: str, net_position: int) -> Optional[dict]:
@@ -239,7 +239,7 @@ def close_position(ticker: str, net_position: int) -> Optional[dict]:
 
 
 def cancel_order(order_id: str) -> dict:
-    return _delete(f"/orders/{order_id}")
+    return _delete(f"/portfolio/orders/{order_id}")
 
 
 def cancel_all_resting() -> list:
