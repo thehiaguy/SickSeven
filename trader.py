@@ -116,6 +116,8 @@ def _empty_state() -> dict:
         "ordered_ticker_cost_usd": 0.0,
         "ordered_ticker_side":     None,
         "ordered_ticker_count":    0,
+        # Signal stability gate: direction from the previous cycle
+        "prev_signal_direction":   "neutral",
     }
 
 
@@ -379,7 +381,8 @@ def run_cycle(config: dict, state: dict) -> dict:
                                 f"Profit-take: sold {tracked_ticker} {tracked_side.upper()} at {current_bid}¢"
                             )
             except Exception as e:
-                log.warning(f"Profit-take check failed: {e}")
+                body = getattr(getattr(e, "response", None), "text", "")
+                log.warning(f"Profit-take check failed: {e}{' — ' + body if body else ''}")
 
     # ── 4. Guard rails ───────────────────────────────────────────────────────
     if not config["enabled"]:
@@ -387,12 +390,25 @@ def run_cycle(config: dict, state: dict) -> dict:
         return state
 
     if signal["direction"] == "neutral":
+        state["prev_signal_direction"] = "neutral"
         log.info("HOLD — no order placed")
         return state
 
-    if config["only_on_change"] and signal["label"] == prev_label:
-        log.info("Signal unchanged and only_on_change=True — skipping")
-        return state
+    if is_15m:
+        # Stability gate: require 2 consecutive cycles in the same direction.
+        # Prevents entering on a single candle that immediately reverses.
+        prev_dir = state.get("prev_signal_direction", "neutral")
+        state["prev_signal_direction"] = signal["direction"]
+        if prev_dir != signal["direction"]:
+            log.info(
+                f"Stability gate: {signal['label']} first cycle "
+                f"(prev={prev_dir}) — waiting for confirmation"
+            )
+            return state
+    else:
+        if config["only_on_change"] and signal["label"] == prev_label:
+            log.info("Signal unchanged and only_on_change=True — skipping")
+            return state
 
     # Cooldown check
     cd_secs = cooldown_remaining(state.get("last_order_time"), config.get("cooldown_minutes", 15))
@@ -467,6 +483,7 @@ def run_cycle(config: dict, state: dict) -> dict:
             atr_pct=indicators.get("atr_pct", 0.003),
             btc_price=live_price,
             use_greeks=not is_15m,
+            market_order=is_15m,
         )
         if not order_params:
             log.info("No order computed (missing price data?)")
@@ -523,14 +540,27 @@ def run_cycle(config: dict, state: dict) -> dict:
             state["last_order_time"] = now
             log.info(f"Order placed: {result}")
             if is_15m:
-                state["ordered_ticker"]          = market["ticker"]
-                state["ordered_ticker_expiry"]   = (market.get("close_time")
-                                                    or market.get("expiration_time"))
-                state["ordered_ticker_cost_usd"] = (state.get("ordered_ticker_cost_usd", 0.0)
-                                                    + order_params["cost_usd"])
-                state["ordered_ticker_side"]     = order_params["side"]
-                state["ordered_ticker_count"]    = (state.get("ordered_ticker_count", 0)
-                                                    + order_params["count"])
+                order_data   = result.get("order", {})
+                filled_count = int(float(order_data.get("fill_count_fp", 0)))
+                order_status = order_data.get("status", "")
+                if filled_count > 0 or order_status == "executed":
+                    state["ordered_ticker"]          = market["ticker"]
+                    state["ordered_ticker_expiry"]   = (market.get("close_time")
+                                                        or market.get("expiration_time"))
+                    state["ordered_ticker_cost_usd"] = (state.get("ordered_ticker_cost_usd", 0.0)
+                                                        + order_params["cost_usd"])
+                    state["ordered_ticker_side"]     = order_params["side"]
+                    state["ordered_ticker_count"]    = (state.get("ordered_ticker_count", 0)
+                                                        + filled_count)
+                    log.info(
+                        f"15M position confirmed: {filled_count} contracts filled on "
+                        f"{market['ticker']} — profit-take tracking active"
+                    )
+                else:
+                    log.warning(
+                        f"15M order {order_status} with 0 fills on {market['ticker']} "
+                        f"— not tracking for profit-take (no position held)"
+                    )
         except Exception as e:
             log.error(f"Order placement failed: {e}", exc_info=True)
             order_record["result"] = f"ERROR: {e}"

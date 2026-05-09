@@ -97,12 +97,17 @@ def _request(method: str, path: str, *, params=None, json=None, timeout=10) -> d
         except requests.HTTPError as e:
             if e.response is not None:
                 status = e.response.status_code
+                try:
+                    body = e.response.json()
+                except Exception:
+                    body = e.response.text
                 if status == 429:
-                    # Rate-limited — back off and retry
                     last_exc = e
                 elif 400 <= status < 500:
-                    # Other 4xx are not transient — don't retry
-                    raise
+                    # Re-raise with the response body included so callers see why
+                    raise requests.HTTPError(
+                        f"{e} — {body}", response=e.response
+                    ) from e
                 else:
                     last_exc = e
             else:

@@ -217,6 +217,10 @@ def generate_signal(ind: dict) -> dict:
     else:
         label, direction, strength = "HOLD",          "neutral", 0.0
 
+    # RSI ceiling: never enter bullish when RSI is extreme (>72)
+    if direction == "up" and rsi > 72:
+        label, direction, strength = "HOLD", "neutral", 0.0
+
     return {
         "label":      label,
         "direction":  direction,
@@ -426,6 +430,7 @@ def compute_order(
     atr_pct: float = 0.003,
     btc_price: float = 0.0,
     use_greeks: bool = True,
+    market_order: bool = False,
 ) -> Optional[dict]:
     """
     Convert signal + market into order parameters.
@@ -474,16 +479,40 @@ def compute_order(
     if greeks and greeks.get("near_expiry"):
         suggested_stop_pct = 0.20
 
-    # Limit 1 cent above ask — quick fill without chasing the book
-    limit_price = min(99, max(1, ask + 1))
-    cost_usd    = round(count * limit_price / 100, 2)
-
     greek_note = ""
     if greeks:
         greek_note = (
             f" | Δ={greeks['delta_per_1k']:.1f}¢/$1k"
             + (" [near-expiry]" if greeks["near_expiry"] else "")
         )
+
+    if market_order:
+        # Kalshi requires a price even for aggressive taker orders.
+        # Ask + 5¢ (capped at 99¢) crosses the spread and fills immediately.
+        limit_price = min(99, max(1, ask + 5))
+        cost_usd    = round(count * limit_price / 100, 2)
+        return {
+            "ticker":             market["ticker"],
+            "action":             "buy",
+            "side":               side,
+            "count":              count,
+            "order_type":         "limit",
+            "price_cents":        limit_price,
+            "cost_usd":           cost_usd,
+            "suggested_stop_pct": suggested_stop_pct,
+            "greeks":             greeks,
+            "rationale": (
+                f"{signal['label']} | RSI={signal['rsi']:.1f} "
+                f"MACD={'▲' if signal.get('macd_hist', 0) > 0 else '▼'} "
+                f"score={signal['bull_score']:+d} | "
+                f"vol={vol_factor:.2f} greek={greek_factor:.2f} → "
+                f"{count}×@ {limit_price}¢ [taker]{greek_note}"
+            ),
+        }
+
+    # Limit 1 cent above ask — quick fill without chasing the book
+    limit_price = min(99, max(1, ask + 1))
+    cost_usd    = round(count * limit_price / 100, 2)
 
     return {
         "ticker":             market["ticker"],
@@ -640,6 +669,10 @@ def generate_short_term_signal(ind: dict) -> dict:
         label, direction, strength = "SELL",          "down",    0.5
     else:
         label, direction, strength = "HOLD",          "neutral", 0.0
+
+    # RSI ceiling: never enter bullish when RSI is extreme (>72)
+    if direction == "up" and rsi > 72:
+        label, direction, strength = "HOLD", "neutral", 0.0
 
     return {
         "label":      label,
